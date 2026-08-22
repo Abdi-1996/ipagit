@@ -1,0 +1,162 @@
+name: Build IPAAction v2.7
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "IPAAction-v2.7.zip"
+      - "IPAAction.zip"
+      - "project.yml"
+      - "IPAAction/**"
+      - ".github/workflows/build-ipaaction-v2.7.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build IPAAction v2.7
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_ROOT="$GITHUB_WORKSPACE"
+          PROJECT_YML="$(find "$SOURCE_ROOT" -maxdepth 4 -type f -name project.yml -print -quit || true)"
+
+          if [ -z "$PROJECT_YML" ]; then
+            ZIP_FILE=""
+            if [ -s IPAAction-v2.7.zip ]; then
+              ZIP_FILE="$GITHUB_WORKSPACE/IPAAction-v2.7.zip"
+            elif [ -s IPAAction.zip ]; then
+              ZIP_FILE="$GITHUB_WORKSPACE/IPAAction.zip"
+            else
+              ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name '*.zip' -print -quit || true)"
+            fi
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: project.yml and ZIP archive were not found"
+              exit 1
+            fi
+
+            echo "Using archive: $ZIP_FILE"
+            unzip -t "$ZIP_FILE" >/dev/null
+
+            EXTRACT_DIR="$RUNNER_TEMP/IPAActionSource"
+            rm -rf "$EXTRACT_DIR"
+            mkdir -p "$EXTRACT_DIR"
+            unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+            SOURCE_ROOT="$EXTRACT_DIR"
+            PROJECT_YML="$(find "$SOURCE_ROOT" -type f -name project.yml -print -quit || true)"
+          fi
+
+          if [ -z "$PROJECT_YML" ]; then
+            echo "ERROR: project.yml not found"
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_YML")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJECT_DIR"
+          find "$PROJECT_DIR" -maxdepth 3 -type f | sort | head -300
+
+      - name: Install XcodeGen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          xcodegen generate
+
+          PROJECT="$(find "$PROJECT_DIR" -maxdepth 1 -type d -name '*.xcodeproj' -print -quit)"
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: xcodegen did not generate .xcodeproj"
+            exit 1
+          fi
+
+          echo "PROJECT_PATH=$PROJECT" >> "$GITHUB_ENV"
+          echo "Generated: $PROJECT"
+
+      - name: Detect scheme
+        shell: bash
+        run: |
+          set -euo pipefail
+          JSON="$(xcodebuild -list -json -project "$PROJECT_PATH")"
+          SCHEME="$(printf '%s' "$JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=(d.get("project") or {}).get("schemes",[]); print("IPAAction" if "IPAAction" in s else (s[0] if s else ""))')"
+          if [ -z "$SCHEME" ]; then
+            echo "ERROR: no scheme found"
+            exit 1
+          fi
+          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
+          echo "Using scheme: $SCHEME"
+
+      - name: Resolve Swift packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME"
+
+      - name: Build unsigned app
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Create IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: built .app not found"
+            exit 1
+          fi
+
+          rm -rf "$RUNNER_TEMP/Payload"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          rm -f IPAAction.ipa
+          /usr/bin/zip -qry IPAAction.ipa Payload
+          unzip -t IPAAction.ipa >/dev/null
+          ls -lh IPAAction.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: IPAAction-v2.7-IPA
+          path: ${{ runner.temp }}/IPAAction.ipa
+          if-no-files-found: error
+          retention-days: 14
