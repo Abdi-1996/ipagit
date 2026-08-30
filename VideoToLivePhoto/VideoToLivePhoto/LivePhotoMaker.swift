@@ -83,7 +83,7 @@ enum LivePhotoMaker {
             throw LivePhotoError.photoAccessDenied
         }
 
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             PHPhotoLibrary.shared().performChanges {
                 let request = PHAssetCreationRequest.forAsset()
 
@@ -234,7 +234,7 @@ enum LivePhotoMaker {
         reader: AVAssetReader,
         writer: AVAssetWriter
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let group = DispatchGroup()
             let lock = NSLock()
             var failure: Error?
